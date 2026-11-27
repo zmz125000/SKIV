@@ -106,13 +106,14 @@ SKIV_Image_Rec709toICtCp (DirectX::XMVECTOR N)
 {
   using namespace DirectX;
 
-  XMVECTOR ret = N;
+  static const XMMATRIX toLMS = XMMatrixMultiply (c_from709toXYZ, c_fromXYZtoLMS);
+  const XMVECTOR lms = XMVector3Transform (N, toLMS);
 
-  ret = XMVector3Transform (ret, c_from709toXYZ);
-  ret = XMVector3Transform (ret, c_fromXYZtoLMS);
-
-  ret =
-    SKIV_Image_LinearToPQ (XMVectorMax (ret, g_XMZero), PQ.MaxPQ);
+  const XMVECTOR ret = XMVectorSet (
+    static_cast <float> (SKIV_SdrTone::EncodePQ (XMVectorGetX (lms) / double (SKIV_SdrTone::PQPeak))),
+    static_cast <float> (SKIV_SdrTone::EncodePQ (XMVectorGetY (lms) / double (SKIV_SdrTone::PQPeak))),
+    static_cast <float> (SKIV_SdrTone::EncodePQ (XMVectorGetZ (lms) / double (SKIV_SdrTone::PQPeak))),
+    0.0f);
 
   static const DirectX::XMMATRIX ConvMat = // Transposed
   {
@@ -131,8 +132,6 @@ SKIV_Image_ICtCptoRec709 (DirectX::XMVECTOR N)
 {
   using namespace DirectX;
 
-  XMVECTOR ret = N;
-
 #pragma warning( push )
 #pragma warning( disable : 4305 )
 
@@ -146,14 +145,12 @@ SKIV_Image_ICtCptoRec709 (DirectX::XMVECTOR N)
 
 #pragma warning( pop )
 
-  ret =
-    XMVector3Transform (ret, ConvMat);
-
-  ret = SKIV_Image_PQToLinear (ret, PQ.MaxPQ);
-  ret = XMVector3Transform    (ret, c_fromLMStoXYZ);
-
-  return
-    XMVector3Transform (ret, c_fromXYZto709);
+  static const XMMATRIX toRec709 = XMMatrixMultiply (c_fromLMStoXYZ, c_fromXYZto709);
+  const XMVECTOR pqLms = XMVector3Transform (N, ConvMat);
+  const XMVECTOR lms   = XMVectorSet (SKIV_SdrTone::FromPQ (XMVectorGetX (pqLms)),
+                                     SKIV_SdrTone::FromPQ (XMVectorGetY (pqLms)),
+                                     SKIV_SdrTone::FromPQ (XMVectorGetZ (pqLms)), 0.0f);
+  return XMVector3Transform (lms, toRec709);
 };
 
 static uint32_t
@@ -1839,7 +1836,7 @@ SKIV_Image_TonemapToSDR (const DirectX::Image& image, DirectX::ScratchImage& fin
             if (Y_out + Y_in > 0.0f)
             {
               ICtCp.m128_f32 [0] =
-                std::pow (Y_in, 1.18f);
+                SKIV_SdrTone::Pow118 (Y_in);
 
               float I0      = XMVectorGetX (ICtCp);
               float I1      = 0.0f;
@@ -2343,7 +2340,7 @@ SKIV_Image_SaveToDisk_SDR (const DirectX::Image& image, const wchar_t* wszFileNa
           if (Y_out + Y_in > 0.0f)
           {
             ICtCp.m128_f32 [0] =
-              std::pow (Y_in, 1.18f);
+              SKIV_SdrTone::Pow118 (Y_in);
 
             float I0      = XMVectorGetX (ICtCp);
             float I1      = 0.0f;

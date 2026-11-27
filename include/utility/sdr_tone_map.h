@@ -22,7 +22,10 @@
 // SOFTWARE.
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 #include <DirectXPackedVector.h>
 
@@ -44,17 +47,103 @@ namespace SKIV_SdrTone
   inline constexpr float Shoulder = 0.5f * SDRWhite;
   inline constexpr float PQPeak   = 10000.0f / 80.0f;
 
+  inline double EncodePQExact (double linear)
+  {
+    const double p = std::pow (linear, 0.1593017578125);
+    return std::pow ((0.8359375 + 18.8515625 * p) / (1.0 + 18.6875 * p), 78.84375);
+  }
+
+  inline double EncodePQ (double linear)
+  {
+    if (linear <= 0.0)
+    {
+      static const double black = EncodePQExact (0.0);
+      return black;
+    }
+    if (linear == 1.0)
+      return 1.0;
+    if (! (linear >= 0x1p-30 && linear < 1.0))
+      return EncodePQExact (linear);
+
+    // 512 float mantissa steps per octave of normalized linear light.
+    constexpr unsigned shift = 23 - 9;
+    constexpr uint32_t first = std::bit_cast <uint32_t> (0x1p-30f) >> shift;
+    constexpr uint32_t last  = std::bit_cast <uint32_t> (1.0f)     >> shift;
+    static const auto table = []
+    {
+      std::array <double, last - first + 1> values = {};
+      for (uint32_t key = first; key <= last; ++key)
+        values [key - first] = EncodePQExact (std::bit_cast <float> (key << shift));
+      return values;
+    } ();
+
+    const uint32_t bits = std::bit_cast <uint32_t> (static_cast <float> (linear));
+    const uint32_t i    = (bits >> shift) - first;
+    if (i == last - first)
+      return 1.0;
+    const double fraction = (bits & ((1u << shift) - 1)) * (1.0 / (1u << shift));
+    return table [i] + (table [i + 1] - table [i]) * fraction;
+  }
+
+  inline double DecodePQExact (double code)
+  {
+    const double p = std::pow (code, 1.0 / 78.84375);
+    return std::pow (std::max (p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125);
+  }
+
+  inline double DecodePQ (double code)
+  {
+    constexpr unsigned steps = 8192;
+    if (code <= 0.0)
+      return 0.0;
+    if (code == 1.0)
+      return 1.0;
+    if (! (code >= 1.0 / steps && code < 1.0))
+      return DecodePQExact (code);
+
+    static const auto table = []
+    {
+      std::array <double, steps + 1> values = {};
+      for (unsigned i = 0; i <= steps; ++i)
+        values [i] = DecodePQExact (static_cast <double> (i) / steps);
+      return values;
+    } ();
+
+    const double position = code * steps;
+    const auto i = static_cast <unsigned> (position);
+    return table [i] + (table [i + 1] - table [i]) * (position - i);
+  }
+
   inline double ToPQ (double y)
   {
-    const double p = std::pow (std::clamp (y / PQPeak, 0.0, 1.0), 0.1593017578125);
-    return std::pow ((0.8359375 + 18.8515625 * p) / (1.0 + 18.6875 * p), 78.84375);
+    return EncodePQ (std::clamp (y / PQPeak, 0.0, 1.0));
   }
 
   inline float FromPQ (float code)
   {
-    const double p = std::pow (static_cast <double> (code), 1.0 / 78.84375);
-    return static_cast <float> (PQPeak *
-      std::pow (std::max (p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125));
+    return static_cast <float> (PQPeak * DecodePQ (code));
+  }
+
+  inline float Pow118 (float input)
+  {
+    if (! (input > 0.0f && input < 1.0f))
+      return std::pow (input, 1.18f);
+
+    constexpr unsigned steps = 2048;
+    static const auto table = []
+    {
+      std::array <float, steps + 1> values = {};
+      for (unsigned i = 0; i <= steps; ++i)
+      {
+        const float x = static_cast <float> (i) / steps;
+        values [i] = std::pow (x * x, 1.18f);
+      }
+      return values;
+    } ();
+
+    const float position = std::sqrt (input) * steps;
+    const auto i = std::min (static_cast <unsigned> (position), steps - 1);
+    return table [i] + (table [i + 1] - table [i]) * (position - i);
   }
 
   inline float Smooth (float lo, float hi, float value)
@@ -152,7 +241,7 @@ namespace SKIV_SdrTone
     static float Intensity (float input, float peak)
     {
       static const float white = static_cast <float> (ToPQ (1.5));
-      return std::pow (input, 1.18f) * (1.0f + white / (peak * peak) * input) / (1.0f + input / white);
+      return Pow118 (input) * (1.0f + white / (peak * peak) * input) / (1.0f + input / white);
     }
 
     explicit ShoulderCurve (float peak)
